@@ -1,0 +1,818 @@
+<!DOCTYPE html>
+<html lang="pt-BR" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Simulador Kubernetes KEDA + Redis Autoscaling</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        k8s: '#326CE5',
+                        redis: '#DC382D',
+                        keda: '#E95F2B',
+                        terminal: '#0B0F19',
+                    },
+                    fontFamily: {
+                        sans: ['Inter', 'system-ui', 'sans-serif'],
+                        mono: ['JetBrains Mono', 'Menlo', 'Consolas', 'monospace'],
+                    }
+                }
+            }
+        }
+    </script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #090D16;
+            color: #E2E8F0;
+        }
+        .flow-particle {
+            position: absolute;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            pointer-events: none;
+            z-index: 50;
+            box-shadow: 0 0 10px rgba(56, 189, 248, 0.8);
+            transition: transform 0.65s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.3s;
+        }
+        .queue-item-enter {
+            animation: slideIn 0.3s ease-out forwards;
+        }
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateY(-10px) scale(0.9); }
+            to { opacity: 1; transform: translateY(0) scale(1); }
+        }
+        /* Custom scrollbar para terminal e fila */
+        ::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+        ::-webkit-scrollbar-track {
+            background: rgba(15, 23, 42, 0.6);
+        }
+        ::-webkit-scrollbar-thumb {
+            background: rgba(71, 85, 105, 0.6);
+            border-radius: 3px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: rgba(100, 116, 139, 0.8);
+        }
+    </style>
+</head>
+<body class="min-h-screen flex flex-col antialiased selection:bg-blue-600 selection:text-white">
+
+    <header class="border-b border-slate-800/80 bg-slate-900/60 backdrop-blur-md sticky top-0 z-40 px-4 py-3">
+        <div class="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-4">
+            <div class="flex items-center gap-3">
+                <div class="p-2 rounded-xl bg-gradient-to-tr from-blue-600 to-indigo-600 shadow-lg shadow-blue-500/20">
+                    <svg class="w-6 h-6 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
+                        <polyline points="2 17 12 22 22 17"></polyline>
+                        <polyline points="2 12 12 17 22 12"></polyline>
+                    </svg>
+                </div>
+                <div>
+                    <h1 class="text-lg font-bold tracking-tight text-white flex items-center gap-2">
+                        K8s Event-Driven Autoscaling
+                        <span class="text-xs font-semibold px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/20">KEDA + Redis</span>
+                    </h1>
+                    <p class="text-xs text-slate-400">Simulação interativa com métrica de 1 Worker a cada 5 Tarefas (10s por tarefa)</p>
+                </div>
+            </div>
+
+            <div class="flex items-center gap-3 text-xs font-mono">
+                <div class="px-3 py-1.5 rounded-lg bg-slate-800/90 border border-slate-700/60 flex items-center gap-2">
+                    <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                    <span class="text-slate-400">Cluster Status:</span>
+                    <span class="text-emerald-400 font-semibold">Active (Healthy)</span>
+                </div>
+                <div class="px-3 py-1.5 rounded-lg bg-slate-800/90 border border-slate-700/60 flex items-center gap-2">
+                    <span class="text-slate-400">Escala Máxima:</span>
+                    <span class="text-white font-bold" id="header-max-workers">8 Pods</span>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <main class="max-w-7xl mx-auto w-full p-4 lg:p-6 space-y-6 flex-1">
+        
+        <section class="p-5 rounded-2xl bg-gradient-to-r from-slate-900/90 via-slate-900/60 to-slate-900/90 border border-slate-800 shadow-xl backdrop-blur-sm">
+            <div class="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                <div>
+                    <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-1 flex items-center gap-2">
+                        <svg class="w-4 h-4 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+                        Injeção de Carga & Ações do Usuário
+                    </h2>
+                    <p class="text-xs text-slate-400">Clique para criar tarefas assíncronas enviadas pelo Front-end e observe o autoescalonamento dinâmico.</p>
+                </div>
+
+                <div class="flex flex-wrap items-center gap-3">
+                    <button id="btn-single-task" class="relative group overflow-hidden px-4 py-2.5 rounded-xl bg-gradient-to-r from-blue-600 to-blue-500 hover:from-blue-500 hover:to-blue-400 text-white font-semibold text-sm shadow-lg shadow-blue-600/30 transition-all transform active:scale-95 flex items-center gap-2">
+                        <svg class="w-4 h-4 transition-transform group-hover:scale-110" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+                        <span>Criar Tarefa (10s)</span>
+                    </button>
+
+                    <button id="btn-burst-5" class="px-3.5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 hover:border-slate-600 font-medium text-sm transition-all transform active:scale-95 flex items-center gap-1.5 shadow-sm">
+                        <span class="text-amber-400 font-bold">+5</span> Rajada
+                    </button>
+
+                    <button id="btn-burst-10" class="px-3.5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 hover:border-slate-600 font-medium text-sm transition-all transform active:scale-95 flex items-center gap-1.5 shadow-sm">
+                        <span class="text-rose-400 font-bold">+10</span> Estresse
+                    </button>
+
+                    <div class="h-6 w-px bg-slate-800 hidden sm:block"></div>
+
+                    <button id="btn-reset" class="px-3 py-2.5 rounded-xl bg-slate-900/80 hover:bg-rose-950/30 hover:border-rose-800 text-slate-400 hover:text-rose-400 border border-slate-800 font-mono text-xs transition-colors" title="Limpar fila e reiniciar simulação">
+                        Reset
+                    </button>
+                </div>
+            </div>
+
+            <!-- Métricas em tempo real em mini cards -->
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-4 pt-4 border-t border-slate-800/80">
+                <div class="bg-slate-950/60 rounded-xl p-3 border border-slate-800/60">
+                    <div class="text-[11px] uppercase tracking-wider text-slate-400 font-medium">Total Solicitado</div>
+                    <div class="text-xl font-bold font-mono text-white mt-0.5" id="metric-total-created">0</div>
+                </div>
+                <div class="bg-slate-950/60 rounded-xl p-3 border border-slate-800/60">
+                    <div class="text-[11px] uppercase tracking-wider text-slate-400 font-medium">Fila Redis (LLEN)</div>
+                    <div class="text-xl font-bold font-mono text-amber-400 mt-0.5" id="metric-queue-length">0</div>
+                </div>
+                <div class="bg-slate-950/60 rounded-xl p-3 border border-slate-800/60">
+                    <div class="text-[11px] uppercase tracking-wider text-slate-400 font-medium">Pods em Execução</div>
+                    <div class="text-xl font-bold font-mono text-blue-400 mt-0.5 flex items-baseline gap-1">
+                        <span id="metric-active-pods">1</span>
+                        <span class="text-xs text-slate-400 font-normal">/ <span id="metric-desired-pods">1</span> desejado</span>
+                    </div>
+                </div>
+                <div class="bg-slate-950/60 rounded-xl p-3 border border-slate-800/60">
+                    <div class="text-[11px] uppercase tracking-wider text-slate-400 font-medium">Tarefas Finalizadas</div>
+                    <div class="text-xl font-bold font-mono text-emerald-400 mt-0.5" id="metric-completed-tasks">0</div>
+                </div>
+            </div>
+        </section>
+
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+            
+            <!-- Coluna Esquerda: Pipeline Horizontal interligado (8 colunas) -->
+            <div class="lg:col-span-8 space-y-6">
+                
+                <div class="bg-slate-900/70 border border-slate-800 rounded-2xl p-5 shadow-lg relative">
+                    <div class="flex items-center justify-between mb-4">
+                        <h2 class="text-sm font-semibold text-slate-200 flex items-center gap-2">
+                            <span class="w-2.5 h-2.5 rounded-full bg-blue-500"></span>
+                            Pipeline de Comunicação e Eventos
+                        </h2>
+                        <span class="text-xs text-slate-400 font-mono">End-to-End Tracing</span>
+                    </div>
+
+                    <!-- Grid de blocos conceituais interligados -->
+                    <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 relative" id="pipeline-nodes">
+                        
+                        <!-- Bloco 1: Frontend -->
+                        <div id="node-frontend" class="bg-slate-950/80 rounded-xl p-4 border border-slate-800/90 relative transition-all duration-300">
+                            <div class="flex items-center justify-between mb-2">
+                                <span class="text-[10px] font-mono uppercase tracking-wider text-slate-400 bg-slate-800 px-2 py-0.5 rounded">Origem</span>
+                                <div class="w-2 h-2 rounded-full bg-slate-600" id="pulse-frontend"></div>
+                            </div>
+                            <div class="text-sm font-bold text-white flex items-center gap-2">
+                                <svg class="w-4 h-4 text-sky-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
+                                Front-end Client
+                            </div>
+                            <p class="text-[11px] text-slate-400 mt-1">Dispara chamada HTTP POST para a rota de criação de tarefas.</p>
+                            <div class="mt-3 pt-2 border-t border-slate-800/80 text-[11px] font-mono text-slate-400 flex justify-between">
+                                <span>Requisições:</span>
+                                <span class="text-sky-400 font-bold" id="count-frontend-reqs">0</span>
+                            </div>
+                        </div>
+
+                        <!-- Bloco 2: API Gateway / Backend Leve -->
+                        <div id="node-api" class="bg-slate-950/80 rounded-xl p-4 border border-slate-800/90 relative transition-all duration-300">
+                            <div class="flex items-center justify-between mb-2">
+                                <span class="text-[10px] font-mono uppercase tracking-wider text-slate-400 bg-slate-800 px-2 py-0.5 rounded">Gateway</span>
+                                <div class="w-2 h-2 rounded-full bg-slate-600" id="pulse-api"></div>
+                            </div>
+                            <div class="text-sm font-bold text-white flex items-center gap-2">
+                                <svg class="w-4 h-4 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2"/></svg>
+                                API Backend Leve
+                            </div>
+                            <p class="text-[11px] text-slate-400 mt-1">Executa validação expressa e publica na fila (<code class="text-indigo-300 font-mono">LPUSH</code>).</p>
+                            <div class="mt-3 pt-2 border-t border-slate-800/80 text-[11px] font-mono text-slate-400 flex justify-between">
+                                <span>Enfileirados:</span>
+                                <span class="text-indigo-400 font-bold" id="count-api-pushed">0</span>
+                            </div>
+                        </div>
+
+                        <!-- Bloco 3: Redis Broker -->
+                        <div id="node-redis" class="bg-slate-950/80 rounded-xl p-4 border border-rose-900/40 relative transition-all duration-300">
+                            <div class="flex items-center justify-between mb-2">
+                                <span class="text-[10px] font-mono uppercase tracking-wider text-rose-300 bg-rose-950/60 border border-rose-800/50 px-2 py-0.5 rounded">Broker</span>
+                                <div class="w-2 h-2 rounded-full bg-rose-500 animate-pulse" id="pulse-redis"></div>
+                            </div>
+                            <div class="text-sm font-bold text-rose-300 flex items-center gap-2">
+                                <svg class="w-4 h-4 text-rose-500" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+                                Redis Queue
+                            </div>
+                            <p class="text-[11px] text-slate-400 mt-1">Fila assíncrona aguardando consumo via <code class="text-rose-300 font-mono">BRPOP</code>.</p>
+                            <div class="mt-3 pt-2 border-t border-slate-800/80 text-[11px] font-mono text-slate-400 flex justify-between">
+                                <span>Pendentes:</span>
+                                <span class="text-rose-400 font-bold" id="count-redis-pending">0</span>
+                            </div>
+                        </div>
+
+                    </div>
+
+                    <!-- Fila Visual com os cards/chips das tarefas acumuladas -->
+                    <div class="mt-5 bg-slate-950/90 rounded-xl p-4 border border-slate-800">
+                        <div class="flex items-center justify-between mb-3">
+                            <span class="text-xs font-semibold text-slate-300 flex items-center gap-2">
+                                <svg class="w-4 h-4 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/></svg>
+                                Estado Interno da Fila (<span class="font-mono text-amber-400" id="queue-length-badge">0 itens</span>)
+                            </span>
+                            <span class="text-[11px] text-slate-400">Padrão FIFO (Primeiro a entrar, primeiro a sair)</span>
+                        </div>
+                        
+                        <div id="queue-container" class="flex items-center gap-2 overflow-x-auto py-2 min-h-[56px] border border-dashed border-slate-800 rounded-lg px-3">
+                            <span class="text-xs text-slate-400 italic" id="queue-empty-label">Fila vazia. Clique em "Criar Tarefa" acima para enfileirar.</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="bg-slate-900/70 border border-slate-800 rounded-2xl p-5 shadow-lg">
+                    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-4 pb-3 border-b border-slate-800">
+                        <div>
+                            <h2 class="text-sm font-semibold text-slate-200 flex items-center gap-2">
+                                <svg class="w-4 h-4 text-blue-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
+                                Kubernetes Worker Pods (Deployment: <span class="font-mono text-blue-400">worker-processor</span>)
+                            </h2>
+                            <p class="text-xs text-slate-400">Cada pod processa 1 tarefa por vez durante 10 segundos ininterruptos.</p>
+                        </div>
+                        
+                        <div class="flex items-center gap-2 text-xs font-mono">
+                            <span class="px-2.5 py-1 rounded-md bg-blue-500/10 text-blue-300 border border-blue-500/30">1 Pod / 5 Tarefas</span>
+                        </div>
+                    </div>
+
+                    <!-- Container Grid dos Pods -->
+                    <div id="workers-grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3.5 min-h-[220px]">
+                        <!-- Inserido dinamicamente via JS -->
+                    </div>
+                </div>
+
+            </div>
+
+            <div class="lg:col-span-4 space-y-6">
+                
+                <!-- Bloco KEDA HPA Engine -->
+                <div class="bg-slate-900/70 border border-slate-800 rounded-2xl p-5 shadow-lg">
+                    <div class="flex items-center justify-between mb-3">
+                        <div class="flex items-center gap-2">
+                            <div class="p-1.5 rounded-lg bg-orange-500/10 text-orange-400 border border-orange-500/20">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
+                            </div>
+                            <h2 class="text-sm font-semibold text-slate-200">KEDA Autoscaler Engine</h2>
+                        </div>
+                        <span class="text-[10px] font-mono bg-orange-950/60 text-orange-300 border border-orange-800/40 px-2 py-0.5 rounded">HPA Controller</span>
+                    </div>
+
+                    <p class="text-xs text-slate-400 mb-4 leading-relaxed">
+                        O KEDA verifica o tamanho da fila do Redis e recalcula a cada ciclo a quantidade ideal de réplicas.
+                    </p>
+
+                    <div class="space-y-3 bg-slate-950/80 rounded-xl p-3.5 border border-slate-800/80 font-mono text-xs">
+                        <div class="flex justify-between items-center text-slate-400">
+                            <span>Fila + Tarefas em Execução:</span>
+                            <span class="text-white font-bold" id="keda-total-workload">0</span>
+                        </div>
+                        <div class="flex justify-between items-center text-slate-400">
+                            <span>Meta por Pod (Target):</span>
+                            <span class="text-amber-400 font-bold">5 tarefas</span>
+                        </div>
+                        <div class="flex justify-between items-center text-slate-400">
+                            <span>Cálculo KEDA / HPA:</span>
+                            <span class="text-cyan-400 font-bold" id="keda-formula">ceil(0 / 5) = 1</span>
+                        </div>
+                        <div class="flex justify-between items-center pt-2 border-t border-slate-800/80 text-slate-300">
+                            <span>Réplicas Alvo Desejadas:</span>
+                            <span class="text-blue-400 font-bold text-sm" id="keda-target-replicas">1 Pod</span>
+                        </div>
+                    </div>
+
+                    <!-- Escala Visual da barra de demanda -->
+                    <div class="mt-4">
+                        <div class="flex justify-between text-[11px] text-slate-400 mb-1">
+                            <span>Pressão de Demanda</span>
+                            <span id="demand-percentage" class="font-mono text-slate-300">0%</span>
+                        </div>
+                        <div class="w-full h-2 bg-slate-950 rounded-full overflow-hidden border border-slate-800">
+                            <div id="demand-bar" class="h-full bg-gradient-to-r from-blue-500 via-amber-500 to-rose-500 transition-all duration-300" style="width: 12%;"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Terminal de Logs ao Vivo -->
+                <div class="bg-slate-900/70 border border-slate-800 rounded-2xl p-4 shadow-lg flex flex-col h-[340px]">
+                    <div class="flex items-center justify-between pb-3 border-b border-slate-800 mb-2">
+                        <div class="flex items-center gap-2">
+                            <div class="flex gap-1.5">
+                                <div class="w-2.5 h-2.5 rounded-full bg-rose-500/80"></div>
+                                <div class="w-2.5 h-2.5 rounded-full bg-amber-500/80"></div>
+                                <div class="w-2.5 h-2.5 rounded-full bg-emerald-500/80"></div>
+                            </div>
+                            <span class="text-xs font-mono font-semibold text-slate-300 ml-1">K8s & Cluster Events Stream</span>
+                        </div>
+                        <button id="btn-clear-logs" class="text-[11px] text-slate-400 hover:text-slate-200 transition-colors font-mono">Limpar</button>
+                    </div>
+
+                    <div id="terminal-logs" class="flex-1 overflow-y-auto space-y-1.5 font-mono text-[11px] pr-1 select-text">
+                        <!-- Logs gerados dinamicamente -->
+                    </div>
+                </div>
+
+            </div>
+
+        </div>
+
+    </main>
+
+    <script>
+        // Configurações do Sistema
+        const CONFIG = {
+            TASK_DURATION_MS: 10000,   // Exatos 10 segundos de processamento por tarefa
+            SCALE_RATIO: 5,            // 1 container worker para cada 5 tarefas
+            MIN_WORKERS: 1,            // Pelo menos 1 worker ocioso em espera (base)
+            MAX_WORKERS: 8,            // Limite superior de réplicas
+            PROBE_INIT_TIME_MS: 2000,  // Tempo de Readiness Probe para pod novo
+            GRACE_PERIOD_MS: 3000      // Tempo de Graceful Shutdown (SIGTERM)
+        };
+
+        // Estado do Cluster
+        const STATE = {
+            taskIdCounter: 100,
+            frontendCount: 0,
+            apiPushedCount: 0,
+            completedCount: 0,
+            queue: [], // Array de objetos { id, createdAt, duration }
+            workers: [], // Array de workers { id, name, status, currentTask, progress, startTime, timerId, cooldownTimer }
+            desiredWorkers: 1
+        };
+
+        // Elementos DOM
+        const elQueueContainer = document.getElementById('queue-container');
+        const elQueueEmptyLabel = document.getElementById('queue-empty-label');
+        const elQueueLengthBadge = document.getElementById('queue-length-badge');
+        const elWorkersGrid = document.getElementById('workers-grid');
+        const elTerminalLogs = document.getElementById('terminal-logs');
+        const elMetricTotalCreated = document.getElementById('metric-total-created');
+        const elMetricQueueLength = document.getElementById('metric-queue-length');
+        const elMetricActivePods = document.getElementById('metric-active-pods');
+        const elMetricDesiredPods = document.getElementById('metric-desired-pods');
+        const elMetricCompletedTasks = document.getElementById('metric-completed-tasks');
+        const elCountFrontendReqs = document.getElementById('count-frontend-reqs');
+        const elCountApiPushed = document.getElementById('count-api-pushed');
+        const elCountRedisPending = document.getElementById('count-redis-pending');
+        const elKedaTotalWorkload = document.getElementById('keda-total-workload');
+        const elKedaFormula = document.getElementById('keda-formula');
+        const elKedaTargetReplicas = document.getElementById('keda-target-replicas');
+        const elDemandPercentage = document.getElementById('demand-percentage');
+        const elDemandBar = document.getElementById('demand-bar');
+
+        function getTimestamp() {
+            const now = new Date();
+            return now.toTimeString().split(' ')[0] + '.' + String(now.getMilliseconds()).padStart(3, '0');
+        }
+
+        function appendLog(category, message, level = 'info') {
+            const div = document.createElement('div');
+            div.className = 'flex items-start gap-2 leading-tight py-0.5';
+
+            let tagColor = 'bg-slate-800 text-slate-300 border-slate-700';
+            if (category === 'API') tagColor = 'bg-indigo-950/80 text-indigo-300 border-indigo-800/60';
+            if (category === 'REDIS') tagColor = 'bg-rose-950/80 text-rose-300 border-rose-800/60';
+            if (category === 'KEDA') tagColor = 'bg-orange-950/80 text-orange-300 border-orange-800/60';
+            if (category === 'SCHEDULER') tagColor = 'bg-blue-950/80 text-blue-300 border-blue-800/60';
+            if (category.startsWith('WORKER')) tagColor = 'bg-emerald-950/80 text-emerald-300 border-emerald-800/60';
+
+            let msgColor = 'text-slate-300';
+            if (level === 'success') msgColor = 'text-emerald-300';
+            if (level === 'warn') msgColor = 'text-amber-300';
+            if (level === 'error') msgColor = 'text-rose-300';
+
+            div.innerHTML = `
+                <span class="text-slate-400 shrink-0 font-mono text-[10px]">${getTimestamp()}</span>
+                <span class="px-1.5 py-0.2 rounded text-[9px] font-bold border ${tagColor} shrink-0">${category}</span>
+                <span class="${msgColor}">${message}</span>
+            `;
+
+            elTerminalLogs.appendChild(div);
+            elTerminalLogs.scrollTop = elTerminalLogs.scrollHeight;
+        }
+
+        function triggerPulse(nodeId) {
+            const el = document.getElementById(nodeId);
+            if (!el) return;
+            el.classList.add('ring-2', 'ring-blue-400', 'bg-slate-900');
+            setTimeout(() => {
+                el.classList.remove('ring-2', 'ring-blue-400', 'bg-slate-900');
+            }, 300);
+        }
+
+        function createFlowParticle(fromId, toId, color = '#38bdf8') {
+            const fromElem = document.getElementById(fromId);
+            const toElem = document.getElementById(toId);
+            if (!fromElem || !toElem) return;
+
+            const fromRect = fromElem.getBoundingClientRect();
+            const toRect = toElem.getBoundingClientRect();
+
+            const particle = document.createElement('div');
+            particle.className = 'flow-particle';
+            particle.style.backgroundColor = color;
+            particle.style.boxShadow = `0 0 10px ${color}`;
+            particle.style.left = `${fromRect.left + fromRect.width / 2}px`;
+            particle.style.top = `${fromRect.top + fromRect.height / 2}px`;
+            document.body.appendChild(particle);
+
+            requestAnimationFrame(() => {
+                const deltaX = (toRect.left + toRect.width / 2) - (fromRect.left + fromRect.width / 2);
+                const deltaY = (toRect.top + toRect.height / 2) - (fromRect.top + fromRect.height / 2);
+                particle.style.transform = `translate(${deltaX}px, ${deltaY}px) scale(1.4)`;
+
+                setTimeout(() => {
+                    particle.style.opacity = '0';
+                    setTimeout(() => particle.remove(), 250);
+                }, 600);
+            });
+        }
+
+        let workerUidCounter = 1;
+
+        function createWorkerPod() {
+            const uid = workerUidCounter++;
+            const worker = {
+                id: uid,
+                name: `worker-pod-${uid.toString().padStart(2, '0')}`,
+                status: 'STARTING', // 'STARTING', 'IDLE', 'BUSY', 'TERMINATING'
+                currentTask: null,
+                progress: 0,
+                startTime: Date.now(),
+                timerId: null,
+                isTerminating: false
+            };
+
+            STATE.workers.push(worker);
+            renderWorkers();
+            appendLog('SCHEDULER', `Pod ${worker.name} provisionado. Iniciando Readiness Probe...`, 'warn');
+
+            // Simula o tempo de boot e teste de prontidão (Readiness Probe)
+            setTimeout(() => {
+                if (worker.status === 'STARTING') {
+                    worker.status = 'IDLE';
+                    appendLog(worker.name.toUpperCase(), `Readiness Probe OK. Pod pronto para receber tarefas.`, 'success');
+                    renderWorkers();
+                    tryAssignTasksToWorkers();
+                }
+            }, CONFIG.PROBE_INIT_TIME_MS);
+
+            return worker;
+        }
+
+        function terminateWorkerPod(worker) {
+            if (worker.isTerminating) return;
+            worker.isTerminating = true;
+            worker.status = 'TERMINATING';
+            renderWorkers();
+            appendLog('KEDA', `Cooldown ativado para ${worker.name}. Enviando sinal SIGTERM (Graceful Shutdown)...`, 'warn');
+
+            setTimeout(() => {
+                const index = STATE.workers.findIndex(w => w.id === worker.id);
+                if (index !== -1) {
+                    STATE.workers.splice(index, 1);
+                    appendLog('SCHEDULER', `Pod ${worker.name} finalizado e removido do cluster Kubernetes.`, 'info');
+                    renderWorkers();
+                    recalculateAutoscaling();
+                }
+            }, CONFIG.GRACE_PERIOD_MS);
+        }
+
+        function tryAssignTasksToWorkers() {
+            if (STATE.queue.length === 0) return;
+
+            // Encontrar workers ociosos que estão prontos
+            const idleWorkers = STATE.workers.filter(w => w.status === 'IDLE' && !w.isTerminating);
+
+            idleWorkers.forEach(worker => {
+                if (STATE.queue.length > 0) {
+                    const task = STATE.queue.shift(); // BRPOP atômico
+                    assignTaskToWorker(worker, task);
+                }
+            });
+
+            renderQueue();
+            updateDashboardMetrics();
+            recalculateAutoscaling();
+        }
+
+        function assignTaskToWorker(worker, task) {
+            worker.status = 'BUSY';
+            worker.currentTask = task;
+            worker.progress = 0;
+            renderWorkers();
+
+            appendLog(worker.name.toUpperCase(), `Comando BRPOP efetuado: Assumiu Tarefa #${task.id}. Executando processamento de 10s...`, 'info');
+
+            const start = Date.now();
+            const duration = CONFIG.TASK_DURATION_MS;
+
+            // Loop de progresso de 100ms
+            worker.timerId = setInterval(() => {
+                const elapsed = Date.now() - start;
+                worker.progress = Math.min(100, Math.floor((elapsed / duration) * 100));
+                
+                // Atualiza a barra de progresso no DOM diretamente para máxima fluidez
+                const bar = document.getElementById(`progress-bar-${worker.id}`);
+                const pct = document.getElementById(`progress-pct-${worker.id}`);
+                const sec = document.getElementById(`progress-sec-${worker.id}`);
+                if (bar) bar.style.width = `${worker.progress}%`;
+                if (pct) pct.textContent = `${worker.progress}%`;
+                if (sec) sec.textContent = `${((duration - elapsed) / 1000).toFixed(1)}s`;
+
+                if (elapsed >= duration) {
+                    clearInterval(worker.timerId);
+                    completeWorkerTask(worker);
+                }
+            }, 100);
+        }
+
+        function completeWorkerTask(worker) {
+            const completedTask = worker.currentTask;
+            worker.currentTask = null;
+            worker.progress = 0;
+            worker.status = 'IDLE';
+            STATE.completedCount++;
+
+            appendLog(worker.name.toUpperCase(), `Tarefa #${completedTask.id} concluída com sucesso após 10 segundos.`, 'success');
+            renderWorkers();
+            updateDashboardMetrics();
+
+            // Tenta consumir a próxima tarefa pendente na fila Redis
+            tryAssignTasksToWorkers();
+        }
+
+        function recalculateAutoscaling() {
+            // Carga total = itens ainda na fila + tarefas em processamento no momento
+            const busyWorkersCount = STATE.workers.filter(w => w.status === 'BUSY').length;
+            const totalWorkload = STATE.queue.length + busyWorkersCount;
+
+            // Regra Estrita: A cada 5 tarefas, exige mais 1 worker
+            // ex: 1-5 tarefas = 1 worker, 6-10 = 2 workers, 11-15 = 3 workers, etc.
+            let desired = Math.ceil(totalWorkload / CONFIG.SCALE_RATIO);
+            if (desired < CONFIG.MIN_WORKERS) desired = CONFIG.MIN_WORKERS;
+            if (desired > CONFIG.MAX_WORKERS) desired = CONFIG.MAX_WORKERS;
+
+            STATE.desiredWorkers = desired;
+
+            // Atualiza o painel do KEDA
+            elKedaTotalWorkload.textContent = `${totalWorkload} (${STATE.queue.length} em fila + ${busyWorkersCount} em proc.)`;
+            elKedaFormula.textContent = `ceil(${totalWorkload} / ${CONFIG.SCALE_RATIO}) = ${desired}`;
+            elKedaTargetReplicas.textContent = `${desired} Pod${desired > 1 ? 's' : ''}`;
+
+            const demandPct = Math.min(100, Math.round((totalWorkload / (CONFIG.MAX_WORKERS * CONFIG.SCALE_RATIO)) * 100));
+            elDemandPercentage.textContent = `${demandPct}%`;
+            elDemandBar.style.width = `${Math.max(8, demandPct)}%`;
+
+            // Escalonamento para Cima (Scale Up)
+            const activeOrStarting = STATE.workers.filter(w => !w.isTerminating);
+            if (activeOrStarting.length < desired) {
+                const needed = desired - activeOrStarting.length;
+                appendLog('KEDA', `Alvo = ${desired} réplicas. Disparando Scale Up de +${needed} pod(s) ao Kubernetes.`, 'info');
+                for (let i = 0; i < needed; i++) {
+                    createWorkerPod();
+                }
+            }
+            // Escalonamento para Baixo (Scale Down)
+            else if (activeOrStarting.length > desired) {
+                // Seleciona workers ociosos para desligamento
+                const idleWorkers = activeOrStarting.filter(w => w.status === 'IDLE');
+                if (idleWorkers.length > 0) {
+                    const toRemove = activeOrStarting.length - desired;
+                    const removingList = idleWorkers.slice(0, toRemove);
+                    removingList.forEach(worker => {
+                        terminateWorkerPod(worker);
+                    });
+                }
+            }
+
+            updateDashboardMetrics();
+        }
+
+        // Loop de verificação periódica do KEDA (simulando polling a cada 1.5s)
+        setInterval(() => {
+            recalculateAutoscaling();
+            tryAssignTasksToWorkers();
+        }, 1500);
+
+        function enqueueNewTask(source = 'USER_CLICK') {
+            STATE.taskIdCounter++;
+            const taskId = STATE.taskIdCounter;
+
+            // 1. Front-end registra chamada
+            STATE.frontendCount++;
+            elCountFrontendReqs.textContent = STATE.frontendCount;
+            triggerPulse('node-frontend');
+
+            // 2. Animação de envio para o API Gateway
+            createFlowParticle('node-frontend', 'node-api', '#38bdf8');
+
+            setTimeout(() => {
+                // API recebe
+                STATE.apiPushedCount++;
+                elCountApiPushed.textContent = STATE.apiPushedCount;
+                triggerPulse('node-api');
+                appendLog('API', `Recebido POST /tarefas -> Validação OK. Executando LPUSH tarefa #${taskId}...`, 'info');
+
+                // Animação para o Redis
+                createFlowParticle('node-api', 'node-redis', '#f43f5e');
+
+                setTimeout(() => {
+                    // Redis enfileira
+                    triggerPulse('node-redis');
+                    STATE.queue.push({
+                        id: taskId,
+                        createdAt: Date.now(),
+                        duration: CONFIG.TASK_DURATION_MS
+                    });
+
+                    appendLog('REDIS', `Mensagem enfileirada no topo da fila (LLEN: ${STATE.queue.length}) [Payload: Tarefa #${taskId}]`, 'info');
+                    
+                    renderQueue();
+                    updateDashboardMetrics();
+                    recalculateAutoscaling();
+                    tryAssignTasksToWorkers();
+                }, 250);
+
+            }, 250);
+        }
+
+        function renderQueue() {
+            const count = STATE.queue.length;
+            elQueueLengthBadge.textContent = `${count} ${count === 1 ? 'item' : 'itens'}`;
+            elCountRedisPending.textContent = count;
+
+            if (count === 0) {
+                elQueueContainer.innerHTML = '<span class="text-xs text-slate-400 italic" id="queue-empty-label">Fila vazia. Clique em "Criar Tarefa" acima para enfileirar.</span>';
+                return;
+            }
+
+            elQueueContainer.innerHTML = '';
+            STATE.queue.forEach((task, idx) => {
+                const chip = document.createElement('div');
+                chip.className = 'queue-item-enter shrink-0 px-2.5 py-1.5 rounded-lg bg-rose-950/60 border border-rose-800/60 flex items-center gap-1.5 text-xs font-mono shadow-sm';
+                chip.innerHTML = `
+                    <span class="w-1.5 h-1.5 rounded-full bg-rose-400 animate-pulse"></span>
+                    <span class="text-rose-200 font-bold">#${task.id}</span>
+                    <span class="text-[10px] text-rose-400/80 bg-rose-900/50 px-1 rounded">10s</span>
+                `;
+                elQueueContainer.appendChild(chip);
+            });
+        }
+
+        function renderWorkers() {
+            elWorkersGrid.innerHTML = '';
+
+            STATE.workers.forEach(worker => {
+                const card = document.createElement('div');
+                card.id = `worker-card-${worker.id}`;
+
+                let statusBadge = '';
+                let borderClass = 'border-slate-800';
+                let bgGradient = 'bg-slate-950/80';
+
+                if (worker.status === 'STARTING') {
+                    borderClass = 'border-amber-500/50';
+                    bgGradient = 'bg-amber-950/20';
+                    statusBadge = `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/10 text-amber-400 border border-amber-500/30 flex items-center gap-1"><span class="w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping"></span>Readiness Probe</span>`;
+                } else if (worker.status === 'BUSY') {
+                    borderClass = 'border-blue-500/60 shadow-blue-950/50 shadow-lg';
+                    bgGradient = 'bg-slate-900/90';
+                    statusBadge = `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-blue-500/20 text-blue-300 border border-blue-500/40 flex items-center gap-1"><span class="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse"></span>Processando #${worker.currentTask?.id}</span>`;
+                } else if (worker.status === 'IDLE') {
+                    borderClass = 'border-emerald-500/30';
+                    bgGradient = 'bg-slate-950/80';
+                    statusBadge = `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">Ocioso (Idle)</span>`;
+                } else if (worker.status === 'TERMINATING') {
+                    borderClass = 'border-rose-600/60 opacity-70';
+                    bgGradient = 'bg-rose-950/30';
+                    statusBadge = `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-500/20 text-rose-300 border border-rose-500/40 flex items-center gap-1">SIGTERM (Saindo)</span>`;
+                }
+
+                card.className = `rounded-xl p-3.5 border ${borderClass} ${bgGradient} transition-all duration-300 flex flex-col justify-between relative overflow-hidden`;
+
+                card.innerHTML = `
+                    <div>
+                        <div class="flex items-center justify-between gap-1 mb-2">
+                            <span class="text-xs font-mono font-bold text-slate-200 flex items-center gap-1.5">
+                                <svg class="w-3.5 h-3.5 text-blue-400" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>
+                                ${worker.name}
+                            </span>
+                            ${statusBadge}
+                        </div>
+
+                        <div class="text-[11px] text-slate-400 font-mono flex items-center justify-between mt-2">
+                            <span>Tarefa Atual:</span>
+                            <span class="text-white font-semibold">${worker.currentTask ? `#${worker.currentTask.id}` : 'Nenhuma'}</span>
+                        </div>
+                    </div>
+
+                    <div class="mt-3 pt-2.5 border-t border-slate-800/80">
+                        <div class="flex justify-between text-[10px] font-mono text-slate-400 mb-1">
+                            <span>Progresso</span>
+                            <div class="flex gap-1.5">
+                                <span id="progress-sec-${worker.id}" class="text-slate-400">${worker.status === 'BUSY' ? '10.0s' : '-'}</span>
+                                <span id="progress-pct-${worker.id}" class="text-slate-300 font-bold">${worker.progress}%</span>
+                            </div>
+                        </div>
+                        <div class="w-full h-1.5 bg-slate-900 rounded-full overflow-hidden border border-slate-800">
+                            <div id="progress-bar-${worker.id}" class="h-full bg-gradient-to-r from-blue-500 to-indigo-500 rounded-full transition-all duration-100" style="width: ${worker.progress}%"></div>
+                        </div>
+                    </div>
+                `;
+
+                elWorkersGrid.appendChild(card);
+            });
+        }
+
+        function updateDashboardMetrics() {
+            elMetricTotalCreated.textContent = STATE.taskIdCounter - 100;
+            elMetricQueueLength.textContent = STATE.queue.length;
+            
+            const activeWorkers = STATE.workers.filter(w => !w.isTerminating).length;
+            elMetricActivePods.textContent = activeWorkers;
+            elMetricDesiredPods.textContent = STATE.desiredWorkers;
+            elMetricCompletedTasks.textContent = STATE.completedCount;
+        }
+
+        document.getElementById('btn-single-task').addEventListener('click', () => {
+            enqueueNewTask('SINGLE_CLICK');
+        });
+
+        document.getElementById('btn-burst-5').addEventListener('click', () => {
+            appendLog('API', 'Recebida rajada de 5 tarefas simultâneas...', 'warn');
+            for (let i = 0; i < 5; i++) {
+                setTimeout(() => enqueueNewTask('BURST_5'), i * 80);
+            }
+        });
+
+        document.getElementById('btn-burst-10').addEventListener('click', () => {
+            appendLog('API', 'Recebida rajada de teste de estresse com 10 tarefas simultâneas...', 'error');
+            for (let i = 0; i < 10; i++) {
+                setTimeout(() => enqueueNewTask('BURST_10'), i * 80);
+            }
+        });
+
+        document.getElementById('btn-clear-logs').addEventListener('click', () => {
+            elTerminalLogs.innerHTML = '';
+            appendLog('K8S', 'Terminal limpo pelo usuário.', 'info');
+        });
+
+        document.getElementById('btn-reset').addEventListener('click', () => {
+            STATE.queue = [];
+            STATE.workers.forEach(w => {
+                if (w.timerId) clearInterval(w.timerId);
+            });
+            STATE.workers = [];
+            workerUidCounter = 1;
+            STATE.frontendCount = 0;
+            STATE.apiPushedCount = 0;
+            STATE.completedCount = 0;
+            STATE.taskIdCounter = 100;
+
+            elCountFrontendReqs.textContent = '0';
+            elCountApiPushed.textContent = '0';
+            elCountRedisPending.textContent = '0';
+
+            appendLog('K8S', 'Simulador resetado para o estado inicial.', 'warn');
+            initSimulator();
+        });
+
+        function initSimulator() {
+            // Cria o pod base worker inicial
+            createWorkerPod();
+            renderQueue();
+            updateDashboardMetrics();
+            appendLog('K8S', 'Cluster Kubernetes inicializado. HPA e KEDA prontos para gerenciar tráfego.', 'info');
+        }
+
+        // Inicializar aplicação ao carregar a página
+        window.addEventListener('load', () => {
+            initSimulator();
+        });
+    </script>
+</body>
+</html>
